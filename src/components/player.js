@@ -103,6 +103,7 @@ export class Player {
     this.voiceSelect = document.getElementById('voice-select');
     this.speedSelect = document.getElementById('speed-select');
     this.btnOpenCloneModal = document.getElementById('btn-open-clone-modal');
+    this.autoScrollToggle = document.getElementById('auto-scroll-toggle');
   }
 
   bindEvents() {
@@ -142,13 +143,30 @@ export class Player {
       this.onSpeedChange(e.target.value);
     });
 
-    this.autoScrollToggle.addEventListener('change', (e) => {
-      this.autoScroll = e.target.checked;
-      this.onAutoScrollChange(this.autoScroll);
-    });
+    if (this.autoScrollToggle) {
+      this.autoScrollToggle.addEventListener('change', (e) => {
+        this.autoScroll = e.target.checked;
+        this.onAutoScrollChange(this.autoScroll);
+      });
+    }
   }
 
-  setVoices({ soproVoices = [], systemVoices = [], selectedVoiceUri = null }) {
+  setVoices(options = {}, fallbackVoice = null) {
+    let soproVoices = [];
+    let systemVoices = [];
+    let selectedVoiceUri = null;
+
+    if (Array.isArray(options)) {
+      systemVoices = options;
+      selectedVoiceUri = fallbackVoice ? (fallbackVoice.voiceURI || fallbackVoice) : null;
+      soproVoices = this.lastSoproVoices || [];
+    } else if (options && typeof options === 'object') {
+      soproVoices = options.soproVoices || [];
+      systemVoices = options.systemVoices || [];
+      selectedVoiceUri = options.selectedVoiceUri || null;
+      this.lastSoproVoices = soproVoices;
+    }
+
     this.voiceSelect.innerHTML = '';
 
     // Group 1: Sopro Local Cloned Voices (CPU)

@@ -146,18 +146,23 @@ class PDFReaderApp {
       this.soproVoices = [];
     }
 
+    // Retrieve system voices from ttsService or direct speechSynthesis fallback
+    const sysVoices = (this.ttsService.voices && this.ttsService.voices.length > 0)
+      ? this.ttsService.voices
+      : (window.speechSynthesis ? window.speechSynthesis.getVoices() : []);
+
     // Default to first Sopro voice if available, otherwise system voice
     if (!this.selectedVoiceUri) {
       if (this.soproVoices.length > 0) {
         this.selectedVoiceUri = `sopro:${this.soproVoices[0].id}`;
-      } else if (this.ttsService.selectedVoice) {
-        this.selectedVoiceUri = this.ttsService.selectedVoice.voiceURI;
+      } else if (sysVoices.length > 0) {
+        this.selectedVoiceUri = sysVoices[0].voiceURI;
       }
     }
 
     this.player.setVoices({
       soproVoices: this.soproVoices,
-      systemVoices: this.ttsService.voices,
+      systemVoices: sysVoices,
       selectedVoiceUri: this.selectedVoiceUri
     });
   }
