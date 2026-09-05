@@ -774,6 +774,11 @@ html, body {
   }
 }
 
+/* Utility classes */
+.hidden {
+  display: none !important;
+}
+
 /* ==========================================================================
    Sopro-v2-turbo Voice Cloning Modal & Controls
    ========================================================================== */
@@ -790,6 +795,10 @@ html, body {
   z-index: 1000;
   padding: 16px;
   animation: fadeIn 0.2s ease;
+}
+
+.modal-backdrop.hidden {
+  display: none !important;
 }
 
 .modal-dialog {

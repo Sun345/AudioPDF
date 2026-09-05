@@ -27,6 +27,7 @@ export class CloneVoiceModal {
     this.modalEl = document.createElement('div');
     this.modalEl.id = 'clone-voice-modal';
     this.modalEl.className = 'modal-backdrop hidden';
+    this.modalEl.style.display = 'none';
     this.modalEl.innerHTML = `
       <div class="modal-dialog">
         <div class="modal-header">
@@ -133,12 +134,29 @@ export class CloneVoiceModal {
     const startRecBtn = modal.querySelector('#btn-start-record');
     const stopRecBtn = modal.querySelector('#btn-stop-record');
 
-    closeBtn.addEventListener('click', () => this.close());
-    cancelBtn.addEventListener('click', () => this.close());
+    closeBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.close();
+    });
+    cancelBtn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      this.close();
+    });
 
     // Backdrop click
     modal.addEventListener('click', (e) => {
-      if (e.target === modal) this.close();
+      if (e.target === modal) {
+        this.close();
+      }
+    });
+
+    // Escape key press to close
+    window.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && this.modalEl && this.modalEl.style.display !== 'none') {
+        this.close();
+      }
     });
 
     // Tab switching
@@ -392,13 +410,16 @@ export class CloneVoiceModal {
 
   open() {
     this.modalEl.classList.remove('hidden');
+    this.modalEl.style.display = 'flex';
     this.refreshVoiceList();
-    this.modalEl.querySelector('#voice-name-input').focus();
+    const input = this.modalEl.querySelector('#voice-name-input');
+    if (input) input.focus();
   }
 
   close() {
     this._stopRecording();
     this.modalEl.classList.add('hidden');
+    this.modalEl.style.display = 'none';
     const statusMsg = this.modalEl.querySelector('#modal-status-msg');
     if (statusMsg) statusMsg.textContent = '';
   }
