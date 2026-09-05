@@ -478,14 +478,7 @@ class PDFReaderApp {
 
   handleSkipSentence(direction) {
     if (this.selectedVoiceUri && this.selectedVoiceUri.startsWith('sopro:')) {
-      if (!this.currentPageData || !this.currentPageData.sentences) return;
-      const curWordIdx = soproService.currentWordIndex >= 0 ? soproService.currentWordIndex : 0;
-      const curSentence = this.currentPageData.sentences.findIndex(s => curWordIdx >= s.startWordIdx && curWordIdx <= s.endWordIdx);
-      const targetSentenceIdx = Math.max(0, Math.min(this.currentPageData.sentences.length - 1, (curSentence >= 0 ? curSentence : 0) + direction));
-      const targetSentence = this.currentPageData.sentences[targetSentenceIdx];
-      if (targetSentence) {
-        this.speakFromWord(targetSentence.startWordIdx);
-      }
+      soproService.skipSentence(direction);
     } else {
       this.ttsService.skipSentence(direction);
     }

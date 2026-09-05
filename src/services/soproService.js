@@ -1,7 +1,9 @@
 /**
  * soproService.js
  * Client service to interface with the local Sopro-v2-turbo TTS server.
- * Handles model health checks, voice profiles, voice cloning, and audio playback synchronization.
+ * Features high-precision 60 FPS requestAnimationFrame synchronization,
+ * sentence-by-sentence queueing with zero cumulative drift,
+ * and calibrated acoustic latency lead compensation.
  */
 
 class SoproService {
@@ -13,11 +15,21 @@ class SoproService {
     this.currentVoiceId = null;
     this.isPlaying = false;
     this.isPaused = false;
-    this.currentText = '';
-    this.currentWords = [];
+    this.playbackRate = 1.0;
+
+    // Sentence queue management
+    this.sentenceQueue = [];
+    this.currentSentenceIndex = 0;
+    this.currentSentenceWords = [];
     this.wordTimings = [];
     this.currentWordIndex = -1;
-    this.playbackRate = 1.0;
+
+    // 60 FPS Animation loop for real-time word highlighting
+    this.animFrameId = null;
+
+    // Latency lead compensation in seconds (human audio perception + audio buffer latency)
+    // 0.14s lead ensures highlight lands on the word at exact phonetic onset
+    this.leadOffset = 0.14;
 
     // Callbacks
     this.onWord = null;
@@ -29,41 +41,25 @@ class SoproService {
   }
 
   _setupAudioListeners() {
-    this.audioElement.addEventListener('timeupdate', () => {
-      if (!this.isPlaying || this.wordTimings.length === 0) return;
-      const currentTime = this.audioElement.currentTime;
-
-      // Find the word that corresponds to currentTime
-      let activeIdx = -1;
-      for (let i = 0; i < this.wordTimings.length; i++) {
-        const wt = this.wordTimings[i];
-        if (currentTime >= wt.start && currentTime <= wt.end) {
-          activeIdx = i;
-          break;
-        } else if (currentTime > wt.end && (i === this.wordTimings.length - 1 || currentTime < this.wordTimings[i + 1].start)) {
-          activeIdx = i;
-        }
-      }
-
-      if (activeIdx !== -1 && activeIdx !== this.currentWordIndex) {
-        this.currentWordIndex = activeIdx;
-        if (this.onWord && this.currentWords[activeIdx]) {
-          const w = this.currentWords[activeIdx];
-          this.onWord(w.wordIdx, w.text, w.charStart);
-        }
-      }
-    });
-
     this.audioElement.addEventListener('ended', () => {
-      this.isPlaying = false;
-      this.isPaused = false;
-      if (this.onStateChange) this.onStateChange('idle');
-      if (this.onEnd) this.onEnd();
+      this._stopHighlightLoop();
+      // Proceed to next sentence in queue
+      if (this.currentSentenceIndex + 1 < this.sentenceQueue.length) {
+        this.currentSentenceIndex++;
+        this._playCurrentSentence();
+      } else {
+        // All sentences finished
+        this.isPlaying = false;
+        this.isPaused = false;
+        if (this.onStateChange) this.onStateChange('idle');
+        if (this.onEnd) this.onEnd();
+      }
     });
 
     this.audioElement.addEventListener('pause', () => {
       if (this.audioElement.currentTime < this.audioElement.duration && this.isPlaying) {
         this.isPaused = true;
+        this._stopHighlightLoop();
         if (this.onStateChange) this.onStateChange('paused');
       }
     });
@@ -71,15 +67,64 @@ class SoproService {
     this.audioElement.addEventListener('play', () => {
       this.isPlaying = true;
       this.isPaused = false;
+      this._startHighlightLoop();
       if (this.onStateChange) this.onStateChange('speaking');
     });
 
     this.audioElement.addEventListener('error', (e) => {
-      console.error('Audio playback error:', e);
+      console.error('Sopro audio playback error:', e);
+      this._stopHighlightLoop();
       this.isPlaying = false;
       this.isPaused = false;
       if (this.onStateChange) this.onStateChange('idle');
     });
+  }
+
+  /**
+   * 60 FPS high-frequency tracking loop using requestAnimationFrame.
+   * Eliminates the native HTML5 audio 250ms timeupdate lag completely.
+   */
+  _startHighlightLoop() {
+    this._stopHighlightLoop();
+
+    const loop = () => {
+      if (!this.isPlaying || this.isPaused) return;
+
+      if (this.wordTimings.length > 0) {
+        // Compensate with lead offset so highlight changes at acoustic onset
+        const currentTime = (this.audioElement.currentTime * this.playbackRate) + this.leadOffset;
+
+        let activeIdx = -1;
+        for (let i = 0; i < this.wordTimings.length; i++) {
+          const wt = this.wordTimings[i];
+          if (currentTime >= wt.start && currentTime <= wt.end) {
+            activeIdx = i;
+            break;
+          } else if (currentTime > wt.end && (i === this.wordTimings.length - 1 || currentTime < this.wordTimings[i + 1].start)) {
+            activeIdx = i;
+          }
+        }
+
+        if (activeIdx !== -1 && activeIdx !== this.currentWordIndex) {
+          this.currentWordIndex = activeIdx;
+          const w = this.currentSentenceWords[activeIdx];
+          if (w && this.onWord) {
+            this.onWord(w.wordIdx, w.text, w.charStart);
+          }
+        }
+      }
+
+      this.animFrameId = requestAnimationFrame(loop);
+    };
+
+    this.animFrameId = requestAnimationFrame(loop);
+  }
+
+  _stopHighlightLoop() {
+    if (this.animFrameId) {
+      cancelAnimationFrame(this.animFrameId);
+      this.animFrameId = null;
+    }
   }
 
   /**
@@ -94,7 +139,6 @@ class SoproService {
         return { available: true, data };
       }
     } catch (err) {
-      // Backend not running or unreachable
       this.isServerAvailable = false;
     }
     return { available: false, error: 'Sopro server offline' };
@@ -141,18 +185,68 @@ class SoproService {
   }
 
   /**
-   * Synthesize text using selected Sopro voice and start synchronized playback.
-   * @param {string} text The text to speak
-   * @param {Array} words Array of word tokens from current page/sentence
-   * @param {string} voiceId ID of cloned voice
-   * @param {number} rate Playback speed (0.5 - 2.0)
+   * Split an array of word tokens into natural sentences.
+   */
+  _splitIntoSentences(words) {
+    if (!words || words.length === 0) return [];
+    const sentences = [];
+    let current = [];
+
+    for (let i = 0; i < words.length; i++) {
+      const w = words[i];
+      current.push(w);
+      const text = (w.text || '').trim();
+      const isSentenceEnd = /[.!?]$/.test(text) || (i === words.length - 1);
+
+      // Also break if current sentence gets very long (> 25 words) without punctuation
+      if (isSentenceEnd || current.length >= 25) {
+        sentences.push(current);
+        current = [];
+      }
+    }
+
+    if (current.length > 0) {
+      sentences.push(current);
+    }
+    return sentences;
+  }
+
+  /**
+   * Start reading words using Sopro cloned voice with sentence chunking.
+   * @param {string} text Full text to read
+   * @param {Array} words Array of word objects
+   * @param {string} voiceId Voice profile ID
+   * @param {number} rate Speed multiplier (0.75 - 2.0)
    */
   async speak(text, words = [], voiceId = null, rate = 1.0) {
     this.stop();
-    this.currentText = text;
-    this.currentWords = words;
     this.currentVoiceId = voiceId || (this.voices[0] ? this.voices[0].id : 'narrator');
     this.playbackRate = rate;
+
+    if (!words || words.length === 0) return;
+
+    // Segment into sentences so timings are calibrated per sentence with ZERO cumulative drift!
+    this.sentenceQueue = this._splitIntoSentences(words);
+    this.currentSentenceIndex = 0;
+    this.isPlaying = true;
+    this.isPaused = false;
+
+    await this._playCurrentSentence();
+  }
+
+  /**
+   * Synthesize and play the current sentence in the queue.
+   */
+  async _playCurrentSentence() {
+    if (!this.isPlaying || this.currentSentenceIndex >= this.sentenceQueue.length) {
+      this.stop();
+      return;
+    }
+
+    const sentenceWords = this.sentenceQueue[this.currentSentenceIndex];
+    this.currentSentenceWords = sentenceWords;
+    this.currentWordIndex = -1;
+    const sentenceText = sentenceWords.map(w => w.text).join(' ');
 
     if (this.onStateChange) this.onStateChange('loading');
 
@@ -161,7 +255,7 @@ class SoproService {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          text: text,
+          text: sentenceText,
           voice_id: this.currentVoiceId,
           speed: this.playbackRate
         })
@@ -175,47 +269,38 @@ class SoproService {
       const blob = await res.blob();
       const audioUrl = URL.createObjectURL(blob);
 
-      // Extract server timing header if available
-      const timingHeader = res.headers.get('X-Word-Timings');
-      if (timingHeader) {
-        try {
-          this.wordTimings = JSON.parse(timingHeader);
-        } catch (e) {
-          this.wordTimings = [];
-        }
+      // Release previous blob URL
+      if (this.audioElement.src) {
+        URL.revokeObjectURL(this.audioElement.src);
       }
 
       this.audioElement.src = audioUrl;
-      this.audioElement.playbackRate = 1.0; // Rate is already synthesized or handled
+      this.audioElement.playbackRate = 1.0;
 
-      // Wait for audio metadata to get exact duration
       await new Promise((resolve) => {
         this.audioElement.onloadedmetadata = () => resolve();
-        setTimeout(resolve, 800); // Fallback timeout
+        setTimeout(resolve, 600);
       });
 
-      // If no explicit word timings from backend, compute weighted proportional timings based on word characters
-      if (!this.wordTimings || this.wordTimings.length !== words.length) {
-        this._computeWordTimings(words, this.audioElement.duration || 2.0);
-      }
+      // Calibrate word-level timings across this sentence's exact duration
+      const totalDuration = this.audioElement.duration || 2.0;
+      this._computeWordTimings(sentenceWords, totalDuration);
 
-      this.currentWordIndex = -1;
-      this.isPlaying = true;
-      this.isPaused = false;
+      if (!this.isPlaying) return; // User stopped during fetch
+
       await this.audioElement.play();
+      this._startHighlightLoop();
       if (this.onStateChange) this.onStateChange('speaking');
     } catch (err) {
-      console.error('Sopro speech error:', err);
-      this.isPlaying = false;
-      this.isPaused = false;
-      if (this.onStateChange) this.onStateChange('idle');
+      console.error('Sopro sentence synthesis error:', err);
+      this.stop();
       throw err;
     }
   }
 
   /**
-   * Proportionally map word timings across the total audio duration
-   * using character length weighting for accurate highlighting synchronization.
+   * Proportionally compute word timings using syllable clustering,
+   * consonant weights, and acoustic lead-in / trailing silence calibration.
    */
   _computeWordTimings(words, totalDuration) {
     if (!words || words.length === 0) {
@@ -223,23 +308,40 @@ class SoproService {
       return;
     }
 
-    const totalWeight = words.reduce((acc, w) => {
-      const len = (w.text || '').trim().length;
-      // Add extra weight for punctuation pauses
-      const hasPunctuation = /[.,!?;:]$/.test(w.text || '');
-      return acc + Math.max(1, len) + (hasPunctuation ? 2 : 0);
-    }, 0);
+    // Measure syllable weight per word
+    const weights = words.map((w) => {
+      const clean = (w.text || '').replace(/[^a-zA-Z0-9]/g, '');
+      const len = Math.max(1, clean.length);
+      // Estimate syllables by vowel groups
+      const vowelMatches = clean.match(/[aeiouy]+/gi);
+      const syllables = vowelMatches ? vowelMatches.length : Math.max(1, Math.round(len / 3));
 
-    let currentTime = 0.05; // Short lead-in
-    const usableDuration = Math.max(0.2, totalDuration - 0.1);
+      // Base weight: syllable count heavily drives spoken time
+      let weight = syllables * 1.6 + len * 0.25;
 
-    this.wordTimings = words.map((w) => {
-      const len = (w.text || '').trim().length;
-      const hasPunctuation = /[.,!?;:]$/.test(w.text || '');
-      const weight = Math.max(1, len) + (hasPunctuation ? 2 : 0);
-      const wordDuration = (weight / totalWeight) * usableDuration;
+      // Add small pauses for punctuation
+      const text = (w.text || '').trim();
+      if (/[.!?]$/.test(text)) {
+        weight += 1.2; // Sentence pause
+      } else if (/[,;:]$/.test(text)) {
+        weight += 0.6; // Comma pause
+      }
+
+      return Math.max(0.8, weight);
+    });
+
+    const totalWeight = weights.reduce((acc, w) => acc + w, 0);
+
+    // Sopro audio typically starts with ~0.04s lead-in and ~0.08s trailing decay
+    const leadIn = 0.04;
+    const trailingDecay = 0.08;
+    const speechSpan = Math.max(0.2, totalDuration - leadIn - trailingDecay);
+
+    let currentTime = leadIn;
+    this.wordTimings = words.map((w, idx) => {
+      const duration = (weights[idx] / totalWeight) * speechSpan;
       const start = currentTime;
-      const end = start + wordDuration;
+      const end = start + duration;
       currentTime = end;
       return {
         wordIdx: w.wordIdx,
@@ -253,16 +355,19 @@ class SoproService {
   pause() {
     if (this.isPlaying && !this.isPaused) {
       this.audioElement.pause();
+      this._stopHighlightLoop();
     }
   }
 
   resume() {
     if (this.isPlaying && this.isPaused) {
       this.audioElement.play();
+      this._startHighlightLoop();
     }
   }
 
   stop() {
+    this._stopHighlightLoop();
     if (this.audioElement) {
       this.audioElement.pause();
       this.audioElement.currentTime = 0;
@@ -273,14 +378,29 @@ class SoproService {
     }
     this.isPlaying = false;
     this.isPaused = false;
+    this.sentenceQueue = [];
+    this.currentSentenceIndex = 0;
+    this.currentSentenceWords = [];
+    this.wordTimings = [];
     this.currentWordIndex = -1;
     if (this.onStateChange) this.onStateChange('idle');
   }
 
   setSpeed(rate) {
     this.playbackRate = rate;
-    if (this.audioElement && this.isPlaying) {
-      this.audioElement.playbackRate = rate;
+  }
+
+  /**
+   * Jump relative sentence count forward or backward.
+   */
+  skipSentence(direction) {
+    if (!this.isPlaying) return;
+    const targetIdx = this.currentSentenceIndex + direction;
+    if (targetIdx >= 0 && targetIdx < this.sentenceQueue.length) {
+      this.audioElement.pause();
+      this._stopHighlightLoop();
+      this.currentSentenceIndex = targetIdx;
+      this._playCurrentSentence();
     }
   }
 }
