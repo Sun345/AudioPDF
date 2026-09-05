@@ -1,0 +1,100 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 6 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 8 0 R /F2 9 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 853 >>
+stream
+BT
+/F1 24 Tf
+50 720 Td
+(Welcome to PDF Voice Reader) Tj
+/F2 14 Tf
+0 -40 Td
+(Experience intelligent real-time text to speech with word highlighting.) Tj
+0 -30 Td
+(This reader allows you to listen to documents effortlessly while following) Tj
+0 -20 Td
+(each word as it lights up dynamically on the page.) Tj
+0 -35 Td
+/F1 16 Tf
+(Key Features & Controls) Tj
+/F2 12 Tf
+0 -25 Td
+(1. Real-time word-level synchronization using Web Speech API.) Tj
+0 -20 Td
+(2. Interactive click-to-speak: Click any word to start listening from there.) Tj
+0 -20 Td
+(3. Multiple viewing modes: Authentic Document View and Focus Reader.) Tj
+0 -20 Td
+(4. First-class Dark Mode and Sepia warm reading tones.) Tj
+0 -20 Td
+(5. Adjustable speed, pitch, and natural system voice selection.) Tj
+0 -35 Td
+/F2 12 Tf
+(Click the Play button below or tap any sentence to begin reading!) Tj
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R /Resources << /Font << /F1 8 0 R /F2 9 0 R >> >> >>
+endobj
+6 0 obj
+<< /Length 785 >>
+stream
+BT
+/F1 22 Tf
+50 720 Td
+(Chapter 2: The Future of Accessible Reading) Tj
+/F2 13 Tf
+0 -40 Td
+(Assistive technologies empower learners, researchers, and professionals) Tj
+0 -22 Td
+(to absorb complex information faster and with greater comprehension.) Tj
+0 -30 Td
+(Bimodal presentation combining synchronized auditory speech and visual) Tj
+0 -22 Td
+(text tracking dramatically enhances retention and reduces cognitive load.) Tj
+0 -35 Td
+/F1 16 Tf
+(Customization & Personalization) Tj
+/F2 12 Tf
+0 -25 Td
+(You can toggle between Dark, Light, and Sepia modes to match your) Tj
+0 -20 Td
+(ambient environment. You can also drag and drop any local PDF file) Tj
+0 -20 Td
+(into this window at any time to read research papers, books, or notes.) Tj
+0 -35 Td
+(Enjoy your listening experience!) Tj
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+8 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 9
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000257 00000 n 
+0000001161 00000 n 
+0000001297 00000 n 
+0000002133 00000 n 
+0000002208 00000 n 
+trailer
+<< /Size 9 /Root 1 0 R >>
+startxref
+2278
+%%EOF

@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AudioPDF - Real-Time TTS & Word Highlighting PDF Reader</title>
+    <meta name="description" content="Intelligent PDF Reader featuring real-time Text-to-Speech (TTS) with dynamic word-by-word highlighting, Dark Mode, Focus Teleprompter view, and click-to-speak navigation." />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%236366f1'><path d='M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6'/></svg>" />
+    <link rel="stylesheet" href="/src/styles/main.css" />
+    <style>
+      /* Loading Overlay */
+      .loading-overlay {
+        position: absolute;
+        inset: 0;
+        background: rgba(8, 12, 20, 0.7);
+        backdrop-filter: blur(8px);
+        display: none;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        gap: 16px;
+        z-index: 100;
+      }
+      .spinner {
+        width: 44px;
+        height: 44px;
+        border: 4px solid rgba(255, 255, 255, 0.1);
+        border-left-color: var(--primary);
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+      .loading-text {
+        font-size: 0.95rem;
+        font-weight: 500;
+        color: var(--text-secondary);
+        letter-spacing: 0.02em;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <!-- Header Toolbar -->
+      <header class="toolbar" id="toolbar" role="toolbar" aria-label="PDF Controls">
+        <!-- Injected by Toolbar component -->
+      </header>
+
+      <!-- Main Workspace -->
+      <main class="workspace" id="workspace">
+        <!-- Sidebar Thumbnails -->
+        <aside class="sidebar" id="sidebar" aria-label="Page Thumbnails">
+          <!-- Injected by Sidebar component -->
+        </aside>
+
+        <!-- Viewport Container -->
+        <div class="viewport-container" id="viewport">
+          <!-- Document View (Canvas + Interactive Text Layer) -->
+          <div class="pdf-pages-container" id="doc-container">
+            <!-- Rendered by PDFService -->
+          </div>
+
+          <!-- Focus / Teleprompter View -->
+          <div class="focus-view" id="focus-container" style="display: none;">
+            <!-- Rendered by Focus mode -->
+          </div>
+        </div>
+
+        <!-- Loading Overlay -->
+        <div class="loading-overlay" id="loading-overlay">
+          <div class="spinner"></div>
+          <div class="loading-text">Processing Document...</div>
+        </div>
+      </main>
+
+      <!-- Bottom Audio Player Dock -->
+      <footer class="player-bar" id="player-bar" role="region" aria-label="Audio Playback Controls">
+        <!-- Injected by Player component -->
+      </footer>
+    </div>
+
+    <!-- Application Script -->
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
