@@ -1,11 +1,12 @@
 export class Player {
-  constructor({ onPlayPause, onStop, onSkipSentence, onVoiceChange, onSpeedChange, onAutoScrollChange }) {
+  constructor({ onPlayPause, onStop, onSkipSentence, onVoiceChange, onSpeedChange, onAutoScrollChange, onCloneVoiceClick }) {
     this.onPlayPause = onPlayPause;
     this.onStop = onStop;
     this.onSkipSentence = onSkipSentence;
     this.onVoiceChange = onVoiceChange;
     this.onSpeedChange = onSpeedChange;
     this.onAutoScrollChange = onAutoScrollChange;
+    this.onCloneVoiceClick = onCloneVoiceClick;
 
     this.isPlaying = false;
     this.isPaused = false;
@@ -56,8 +57,13 @@ export class Player {
       </div>
 
       <div class="player-right">
+        <!-- Clone Voice Trigger Button -->
+        <button class="btn-clone-voice" id="btn-open-clone-modal" title="Clone a new voice or record your own voice with Sopro V2 Turbo">
+          <span>✨</span> Clone Voice
+        </button>
+
         <!-- Voice Select -->
-        <div class="control-pill" title="Choose Reading Voice">
+        <div class="control-pill" title="Choose Reading Voice (Sopro AI Cloned or System)">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
           <select id="voice-select" class="voice-select">
             <option value="">Default Voice</option>
@@ -96,7 +102,7 @@ export class Player {
     this.playbackStats = document.getElementById('playback-stats');
     this.voiceSelect = document.getElementById('voice-select');
     this.speedSelect = document.getElementById('speed-select');
-    this.autoScrollToggle = document.getElementById('auto-scroll-toggle');
+    this.btnOpenCloneModal = document.getElementById('btn-open-clone-modal');
   }
 
   bindEvents() {
@@ -116,8 +122,20 @@ export class Player {
       this.onSkipSentence(1);
     });
 
+    if (this.btnOpenCloneModal) {
+      this.btnOpenCloneModal.addEventListener('click', () => {
+        if (this.onCloneVoiceClick) this.onCloneVoiceClick();
+      });
+    }
+
     this.voiceSelect.addEventListener('change', (e) => {
-      this.onVoiceChange(e.target.value);
+      const val = e.target.value;
+      if (val.startsWith('sopro:')) {
+        this.playbackStats.textContent = '🌟 Sopro-v2-turbo (Local CPU) Active';
+      } else {
+        this.playbackStats.textContent = '🖥️ Web Speech Synthesis Active';
+      }
+      this.onVoiceChange(val);
     });
 
     this.speedSelect.addEventListener('change', (e) => {
@@ -130,17 +148,50 @@ export class Player {
     });
   }
 
-  setVoices(voices, selectedVoice) {
+  setVoices({ soproVoices = [], systemVoices = [], selectedVoiceUri = null }) {
     this.voiceSelect.innerHTML = '';
-    voices.forEach((v) => {
-      const opt = document.createElement('option');
-      opt.value = v.voiceURI;
-      opt.textContent = `${v.name} (${v.lang})`;
-      if (selectedVoice && selectedVoice.voiceURI === v.voiceURI) {
-        opt.selected = true;
-      }
-      this.voiceSelect.appendChild(opt);
-    });
+
+    // Group 1: Sopro Local Cloned Voices (CPU)
+    if (soproVoices && soproVoices.length > 0) {
+      const soproGroup = document.createElement('optgroup');
+      soproGroup.label = '🌟 Sopro Local Cloned Voices (CPU)';
+
+      soproVoices.forEach((v) => {
+        const opt = document.createElement('option');
+        opt.value = `sopro:${v.id}`;
+        opt.textContent = `${v.name} ${v.isDefault ? '• Default AI' : '• Cloned'}`;
+        if (selectedVoiceUri === opt.value) {
+          opt.selected = true;
+        }
+        soproGroup.appendChild(opt);
+      });
+      this.voiceSelect.appendChild(soproGroup);
+    }
+
+    // Group 2: System Voices (Web Speech API)
+    if (systemVoices && systemVoices.length > 0) {
+      const sysGroup = document.createElement('optgroup');
+      sysGroup.label = '🖥️ System Voices (Web Speech API)';
+
+      systemVoices.forEach((v) => {
+        const opt = document.createElement('option');
+        opt.value = v.voiceURI;
+        opt.textContent = `${v.name} (${v.lang})`;
+        if (selectedVoiceUri === v.voiceURI) {
+          opt.selected = true;
+        }
+        sysGroup.appendChild(opt);
+      });
+      this.voiceSelect.appendChild(sysGroup);
+    }
+
+    // Update stats label
+    const curVal = this.voiceSelect.value;
+    if (curVal.startsWith('sopro:')) {
+      this.playbackStats.textContent = '🌟 Sopro-v2-turbo (Local CPU) Active';
+    } else {
+      this.playbackStats.textContent = '🖥️ Web Speech Synthesis Active';
+    }
   }
 
   updatePlaybackState({ isPlaying, isPaused, activeWordIndex }) {

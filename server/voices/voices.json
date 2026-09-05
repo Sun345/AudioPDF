@@ -1,0 +1,9 @@
+[
+  {
+    "id": "narrator",
+    "name": "Default Narrator",
+    "isDefault": true,
+    "createdAt": "2026-09-05T00:00:00.000Z",
+    "filename": "narrator.wav"
+  }
+]

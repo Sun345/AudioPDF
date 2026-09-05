@@ -1,8 +1,10 @@
 import { PDFService } from './services/pdfService.js';
 import { TTSService } from './services/ttsService.js';
+import { soproService } from './services/soproService.js';
 import { Toolbar } from './components/toolbar.js';
 import { Player } from './components/player.js';
 import { Sidebar } from './components/sidebar.js';
+import { CloneVoiceModal } from './components/cloneVoiceModal.js';
 
 class PDFReaderApp {
   constructor() {
@@ -14,6 +16,11 @@ class PDFReaderApp {
     this.currentZoom = 1.25;
     this.viewMode = 'doc'; // 'doc' | 'focus' | 'split'
     this.autoScroll = true;
+    this.currentSpeed = 1.0;
+
+    this.currentPageData = null;
+    this.soproVoices = [];
+    this.selectedVoiceUri = null;
 
     // Viewport elements
     this.viewport = document.getElementById('viewport');
@@ -27,6 +34,9 @@ class PDFReaderApp {
   async init() {
     this.initComponents();
     this.bindGlobalEvents();
+
+    // Check Sopro server health & load cloned voices
+    await this.refreshVoices();
 
     // Automatically load sample document so user can test immediately
     await this.loadDocumentUrl('/sample.pdf');
@@ -44,49 +54,125 @@ class PDFReaderApp {
       onToggleSidebar: () => this.sidebar.toggle()
     });
 
-    // 2. Player
+    // 2. Clone Voice Modal
+    this.cloneVoiceModal = new CloneVoiceModal(async (newVoice) => {
+      await this.refreshVoices();
+      if (newVoice) {
+        this.selectedVoiceUri = `sopro:${newVoice.id}`;
+        this.player.setVoices({
+          soproVoices: this.soproVoices,
+          systemVoices: this.ttsService.voices,
+          selectedVoiceUri: this.selectedVoiceUri
+        });
+      }
+    });
+
+    // 3. Player
     this.player = new Player({
       onPlayPause: () => this.handlePlayPause(),
       onStop: () => this.handleStop(),
-      onSkipSentence: (direction) => this.ttsService.skipSentence(direction),
-      onVoiceChange: (voiceURI) => this.ttsService.setVoice(voiceURI),
-      onSpeedChange: (speed) => this.ttsService.setRate(speed),
-      onAutoScrollChange: (enabled) => { this.autoScroll = enabled; }
+      onSkipSentence: (direction) => this.handleSkipSentence(direction),
+      onVoiceChange: (voiceURI) => this.handleVoiceChange(voiceURI),
+      onSpeedChange: (speed) => this.handleSpeedChange(speed),
+      onAutoScrollChange: (enabled) => { this.autoScroll = enabled; },
+      onCloneVoiceClick: () => this.cloneVoiceModal.open()
     });
 
-    // Populate voices when loaded
-    this.ttsService.onVoicesLoaded = (voices) => {
-      this.player.setVoices(voices, this.ttsService.selectedVoice);
+    // Populate voices when Web Speech voices loaded
+    this.ttsService.onVoicesLoaded = () => {
+      this.refreshVoices();
     };
 
-    // 3. Sidebar
+    // 4. Sidebar
     this.sidebar = new Sidebar({
       onSelectPage: (pageNum) => this.goToPage(pageNum)
     });
 
-    // 4. TTS Event Handlers
+    // 5. TTS Event Handlers (Web Speech)
     this.ttsService.onWordCallback = (wordObj, wordIdx) => {
       this.handleWordSpoken(wordObj, wordIdx);
     };
 
     this.ttsService.onStateChangeCallback = (state) => {
-      this.player.updatePlaybackState(state);
+      if (!this.selectedVoiceUri || !this.selectedVoiceUri.startsWith('sopro:')) {
+        this.player.updatePlaybackState(state);
+      }
     };
 
     this.ttsService.onEndCallback = () => {
       this.handleSpeechEnd();
     };
 
-    // 5. PDF Word Click Handler (Doc Mode Click-to-Speak)
+    // 6. Sopro Event Handlers (Local CPU AI Voice)
+    soproService.onWord = (wordIdx, text, charStart) => {
+      if (this.currentPageData && this.currentPageData.words) {
+        const wordObj = this.currentPageData.words.find(w => w.wordIdx === wordIdx);
+        if (wordObj) {
+          this.handleWordSpoken(wordObj, wordIdx);
+        }
+      }
+    };
+
+    soproService.onStateChange = (state) => {
+      if (this.selectedVoiceUri && this.selectedVoiceUri.startsWith('sopro:')) {
+        this.player.updatePlaybackState({
+          isPlaying: state === 'speaking' || state === 'loading',
+          isPaused: state === 'paused'
+        });
+      }
+    };
+
+    soproService.onEnd = () => {
+      this.handleSpeechEnd();
+    };
+
+    // 7. PDF Word Click Handler (Doc Mode Click-to-Speak)
     this.pdfService.onWordClick = (wordIdx, pageNum) => {
       if (pageNum && pageNum !== this.currentPage) {
         this.goToPage(pageNum).then(() => {
-          this.ttsService.speakFromWordIndex(wordIdx);
+          this.speakFromWord(wordIdx);
         });
       } else {
-        this.ttsService.speakFromWordIndex(wordIdx);
+        this.speakFromWord(wordIdx);
       }
     };
+  }
+
+  async refreshVoices() {
+    const health = await soproService.checkHealth();
+    if (health.available) {
+      this.soproVoices = await soproService.getVoices();
+    } else {
+      this.soproVoices = [];
+    }
+
+    // Default to first Sopro voice if available, otherwise system voice
+    if (!this.selectedVoiceUri) {
+      if (this.soproVoices.length > 0) {
+        this.selectedVoiceUri = `sopro:${this.soproVoices[0].id}`;
+      } else if (this.ttsService.selectedVoice) {
+        this.selectedVoiceUri = this.ttsService.selectedVoice.voiceURI;
+      }
+    }
+
+    this.player.setVoices({
+      soproVoices: this.soproVoices,
+      systemVoices: this.ttsService.voices,
+      selectedVoiceUri: this.selectedVoiceUri
+    });
+  }
+
+  handleVoiceChange(voiceURI) {
+    this.selectedVoiceUri = voiceURI;
+    if (voiceURI && !voiceURI.startsWith('sopro:')) {
+      this.ttsService.setVoice(voiceURI);
+    }
+  }
+
+  handleSpeedChange(speed) {
+    this.currentSpeed = parseFloat(speed) || 1.0;
+    this.ttsService.setRate(this.currentSpeed);
+    soproService.setSpeed(this.currentSpeed);
   }
 
   bindGlobalEvents() {
@@ -198,8 +284,7 @@ class PDFReaderApp {
   }
 
   async renderCurrentPage() {
-    this.ttsService.stop();
-    this.player.resetPreview();
+    this.handleStop();
 
     // Determine zoom scale
     let scale = typeof this.currentZoom === 'number' ? this.currentZoom : 1.25;
@@ -214,6 +299,7 @@ class PDFReaderApp {
     // 1. Render Document View Page
     const renderRes = await this.pdfService.renderPage(this.currentPage, this.docContainer, scale);
     const pageData = renderRes.pageData;
+    this.currentPageData = pageData;
 
     // 2. Render Focus View Content
     this.renderFocusPage(pageData);
@@ -284,7 +370,7 @@ class PDFReaderApp {
     }
 
     // 4. Update preview in player bar
-    const currentWords = this.ttsService.currentWords;
+    const currentWords = (this.currentPageData && this.currentPageData.words) || this.ttsService.currentWords;
     this.player.setPreviewWord(wordObj, currentWords, this.currentPage);
 
     // 5. Auto-scroll to keep active word visible
@@ -318,7 +404,7 @@ class PDFReaderApp {
     if (this.currentPage < this.totalPages) {
       await this.goToPage(this.currentPage + 1);
       // Continuous reading seamlessly on next page once rendered
-      this.ttsService.speakFromWordIndex(0);
+      this.speakFromWord(0);
     } else {
       this.handleStop();
     }
@@ -335,21 +421,69 @@ class PDFReaderApp {
     this.renderCurrentPage();
   }
 
-  handlePlayPause() {
-    if (this.ttsService.isPlaying && !this.ttsService.isPaused) {
-      this.ttsService.pause();
+  async speakFromWord(wordIdx) {
+    if (!this.currentPageData || !this.currentPageData.words || this.currentPageData.words.length === 0) return;
+
+    if (this.selectedVoiceUri && this.selectedVoiceUri.startsWith('sopro:')) {
+      // Use local Sopro TTS on CPU
+      this.ttsService.stop();
+      const voiceId = this.selectedVoiceUri.replace('sopro:', '');
+      const remainingWords = this.currentPageData.words.slice(wordIdx);
+      const textToSpeak = remainingWords.map(w => w.text).join(' ');
+
+      try {
+        await soproService.speak(textToSpeak, remainingWords, voiceId, this.currentSpeed);
+      } catch (err) {
+        alert('Sopro speech synthesis error: ' + err.message + '\nMake sure the local Sopro server is running on port 8000.');
+      }
     } else {
-      this.ttsService.play();
+      // Use browser Web Speech API
+      soproService.stop();
+      this.ttsService.speakFromWordIndex(wordIdx);
+    }
+  }
+
+  handlePlayPause() {
+    if (this.selectedVoiceUri && this.selectedVoiceUri.startsWith('sopro:')) {
+      if (soproService.isPlaying && !soproService.isPaused) {
+        soproService.pause();
+      } else if (soproService.isPlaying && soproService.isPaused) {
+        soproService.resume();
+      } else {
+        this.speakFromWord(0);
+      }
+    } else {
+      if (this.ttsService.isPlaying && !this.ttsService.isPaused) {
+        this.ttsService.pause();
+      } else {
+        this.ttsService.play();
+      }
     }
   }
 
   handleStop() {
     this.ttsService.stop();
+    soproService.stop();
     this.player.resetPreview();
     const prevActive = document.querySelectorAll('.focus-word.tts-active-word, .tts-word-hitbox.tts-active-word, .tts-word.tts-active-word');
     prevActive.forEach(el => el.classList.remove('tts-active-word'));
     const activeBoxes = document.querySelectorAll('.word-active-box');
     activeBoxes.forEach(box => { box.style.display = 'none'; });
+  }
+
+  handleSkipSentence(direction) {
+    if (this.selectedVoiceUri && this.selectedVoiceUri.startsWith('sopro:')) {
+      if (!this.currentPageData || !this.currentPageData.sentences) return;
+      const curWordIdx = soproService.currentWordIndex >= 0 ? soproService.currentWordIndex : 0;
+      const curSentence = this.currentPageData.sentences.findIndex(s => curWordIdx >= s.startWordIdx && curWordIdx <= s.endWordIdx);
+      const targetSentenceIdx = Math.max(0, Math.min(this.currentPageData.sentences.length - 1, (curSentence >= 0 ? curSentence : 0) + direction));
+      const targetSentence = this.currentPageData.sentences[targetSentenceIdx];
+      if (targetSentence) {
+        this.speakFromWord(targetSentence.startWordIdx);
+      }
+    } else {
+      this.ttsService.skipSentence(direction);
+    }
   }
 
   changeViewMode(mode) {
