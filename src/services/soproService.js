@@ -17,28 +17,26 @@ class SoproService {
     this.isPaused = false;
     this.playbackRate = 1.0;
 
-    // Sentence queue management & background pipelining
-    this.sentenceQueue = [];
-    this.currentSentenceIndex = 0;
-    this.currentSentenceWords = [];
+    // Page and recording management
+    this.currentPageNum = 1;
+    this.currentDocName = 'Document';
+    this.currentWords = [];
     this.wordTimings = [];
     this.currentWordIndex = -1;
-
-    // Background prefetch cache for zero-latency continuous sentence transitions
-    this.prefetchCache = new Map();
-    this.isPrefetching = new Set();
+    this.lastPageRecording = null;
+    this.lastCompletedRecording = null;
 
     // 60 FPS Animation loop for real-time word highlighting
     this.animFrameId = null;
 
-    // Latency lead compensation in seconds (human audio perception + audio buffer latency)
-    // 0.14s lead ensures highlight lands on the word at exact phonetic onset
+    // Latency lead compensation in seconds
     this.leadOffset = 0.14;
 
     // Callbacks
     this.onWord = null;
     this.onSentence = null;
     this.onEnd = null;
+    this.onPageComplete = null;
     this.onStateChange = null;
 
     this._setupAudioListeners();
@@ -47,17 +45,19 @@ class SoproService {
   _setupAudioListeners() {
     this.audioElement.addEventListener('ended', () => {
       this._stopHighlightLoop();
-      // Proceed to next sentence in queue
-      if (this.currentSentenceIndex + 1 < this.sentenceQueue.length) {
-        this.currentSentenceIndex++;
-        this._playCurrentSentence();
-      } else {
-        // All sentences finished
-        this.isPlaying = false;
-        this.isPaused = false;
-        if (this.onStateChange) this.onStateChange('idle');
-        if (this.onEnd) this.onEnd();
+      this.isPlaying = false;
+      this.isPaused = false;
+
+      // When whole page reading completes, emit page recording for immediate download
+      if (this.lastPageRecording) {
+        this.lastCompletedRecording = { ...this.lastPageRecording };
+        if (this.onPageComplete) {
+          this.onPageComplete(this.lastCompletedRecording);
+        }
       }
+
+      if (this.onStateChange) this.onStateChange('idle');
+      if (this.onEnd) this.onEnd();
     });
 
     this.audioElement.addEventListener('pause', () => {
@@ -111,7 +111,7 @@ class SoproService {
 
         if (activeIdx !== -1 && activeIdx !== this.currentWordIndex) {
           this.currentWordIndex = activeIdx;
-          const w = this.currentSentenceWords[activeIdx];
+          const w = this.currentWords[activeIdx];
           if (w && this.onWord) {
             this.onWord(w.wordIdx, w.text, w.charStart);
           }
@@ -189,107 +189,79 @@ class SoproService {
   }
 
   /**
-   * Split an array of word tokens into natural sentences.
-   */
-  _splitIntoSentences(words) {
-    if (!words || words.length === 0) return [];
-    const sentences = [];
-    let current = [];
-
-    for (let i = 0; i < words.length; i++) {
-      const w = words[i];
-      current.push(w);
-      const text = (w.text || '').trim();
-      const isSentenceEnd = /[.!?]$/.test(text) || (i === words.length - 1);
-
-      // Also break if current sentence gets very long (> 25 words) without punctuation
-      if (isSentenceEnd || current.length >= 25) {
-        sentences.push(current);
-        current = [];
-      }
-    }
-
-    if (current.length > 0) {
-      sentences.push(current);
-    }
-    return sentences;
-  }
-
-  /**
-   * Start reading words using Sopro cloned voice with sentence chunking.
+   * Start reading whole page in one go using Sopro cloned voice (no sentence splitting).
+   * Synthesizes page text in a single pass as MP3 and persists page recording.
    * @param {string} text Full text to read
-   * @param {Array} words Array of word objects
+   * @param {Array} words Array of word objects for the page
    * @param {string} voiceId Voice profile ID
    * @param {number} rate Speed multiplier (0.75 - 2.0)
+   * @param {number} pageNum Page number
+   * @param {string} docName Document name
    */
-  async speak(text, words = [], voiceId = null, rate = 1.0) {
+  async speak(text, words = [], voiceId = null, rate = 1.0, pageNum = 1, docName = 'Document') {
     this.stop();
     this.currentVoiceId = voiceId || (this.voices[0] ? this.voices[0].id : 'narrator');
     this.playbackRate = rate;
+    this.currentPageNum = pageNum || 1;
+    this.currentDocName = docName || 'Document';
+    this.currentWords = words;
+    this.wordTimings = [];
+    this.currentWordIndex = -1;
 
-    if (!words || words.length === 0) return;
+    if (!words || words.length === 0 || !text || !text.trim()) return;
 
-    // Segment into sentences so timings are calibrated per sentence with ZERO cumulative drift!
-    this.sentenceQueue = this._splitIntoSentences(words);
-    this.currentSentenceIndex = 0;
     this.isPlaying = true;
     this.isPaused = false;
-
-    await this._playCurrentSentence();
-  }
-
-  /**
-   * Synthesize and play the current sentence in the queue.
-   * Leverages pre-fetched background audio for zero-gap continuous speech.
-   */
-  async _playCurrentSentence() {
-    if (!this.isPlaying || this.currentSentenceIndex >= this.sentenceQueue.length) {
-      this.stop();
-      return;
-    }
-
-    const sentenceWords = this.sentenceQueue[this.currentSentenceIndex];
-    this.currentSentenceWords = sentenceWords;
-    this.currentWordIndex = -1;
-    const sentenceText = sentenceWords.map(w => w.text).join(' ');
+    if (this.onStateChange) this.onStateChange('loading');
 
     try {
-      let audioUrl = null;
+      // Synthesize whole page in one single go as MP3
+      const res = await fetch(`${this.baseUrl}/synthesize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: text,
+          voice_id: this.currentVoiceId,
+          speed: this.playbackRate,
+          page_num: this.currentPageNum,
+          doc_name: this.currentDocName,
+          format: 'mp3'
+        })
+      });
 
-      // 1. Check if already pre-fetched in background
-      if (this.prefetchCache.has(this.currentSentenceIndex)) {
-        const cached = this.prefetchCache.get(this.currentSentenceIndex);
-        audioUrl = cached.audioUrl;
-        this.prefetchCache.delete(this.currentSentenceIndex);
-      } else {
-        // Not in prefetch cache: fetch immediately
-        if (this.onStateChange) this.onStateChange('loading');
-
-        const res = await fetch(`${this.baseUrl}/synthesize`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            text: sentenceText,
-            voice_id: this.currentVoiceId,
-            speed: this.playbackRate
-          })
-        });
-
-        if (!res.ok) {
-          const err = await res.json().catch(() => ({ detail: 'Synthesis failed' }));
-          throw new Error(err.detail || 'Speech synthesis failed');
-        }
-
-        const blob = await res.blob();
-        audioUrl = URL.createObjectURL(blob);
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: 'Synthesis failed' }));
+        throw new Error(err.detail || 'Speech synthesis failed');
       }
+
+      if (!this.isPlaying) return;
+
+      const durationHeader = parseFloat(res.headers.get('X-Audio-Duration')) || 0;
+      const recId = res.headers.get('X-Recording-Id');
+      const recFilename = res.headers.get('X-Recording-Filename');
+      const voiceName = res.headers.get('X-Recording-Voice') || 'Voice';
+
+      const blob = await res.blob();
+      const audioUrl = URL.createObjectURL(blob);
+
+      this.lastPageRecording = {
+        id: recId,
+        pageNum: this.currentPageNum,
+        docName: this.currentDocName,
+        voiceName: voiceName,
+        voiceId: this.currentVoiceId,
+        duration: durationHeader,
+        filename: recFilename,
+        blob: blob,
+        audioUrl: audioUrl,
+        createdAt: new Date().toISOString()
+      };
 
       if (!this.isPlaying) {
         URL.revokeObjectURL(audioUrl);
         return;
       }
 
-      // Release previous audio URL if any
       if (this.audioElement.src && !this.audioElement.src.startsWith('data:')) {
         URL.revokeObjectURL(this.audioElement.src);
       }
@@ -299,12 +271,14 @@ class SoproService {
 
       await new Promise((resolve) => {
         this.audioElement.onloadedmetadata = () => resolve();
-        setTimeout(resolve, 500);
+        setTimeout(resolve, 600);
       });
 
-      // Calibrate word-level timings across this sentence's exact duration
-      const totalDuration = this.audioElement.duration || 2.0;
-      this._computeWordTimings(sentenceWords, totalDuration);
+      const totalDuration = this.audioElement.duration || durationHeader || 2.0;
+      this.lastPageRecording.duration = totalDuration;
+
+      // Calibrate word-level timings across the whole page's duration
+      this._computeWordTimings(words, totalDuration);
 
       if (!this.isPlaying) return;
 
@@ -312,50 +286,10 @@ class SoproService {
       this._startHighlightLoop();
       if (this.onStateChange) this.onStateChange('speaking');
 
-      // 2. Proactively pre-fetch the next sentence in the background while current sentence plays!
-      this._prefetchSentence(this.currentSentenceIndex + 1);
-
     } catch (err) {
-      console.error('Sopro sentence synthesis error:', err);
+      console.error('Sopro page synthesis error:', err);
       this.stop();
       throw err;
-    }
-  }
-
-  /**
-   * Pre-fetch upcoming sentence audio in the background.
-   * On high-speed CPUs like Ryzen 9, synthesis finishes in ~1s while current sentence
-   * plays for 4-6s, ensuring 100% continuous, zero-gap speech playback!
-   */
-  async _prefetchSentence(idx) {
-    if (idx >= this.sentenceQueue.length || this.prefetchCache.has(idx) || this.isPrefetching.has(idx)) {
-      return;
-    }
-
-    this.isPrefetching.add(idx);
-    const words = this.sentenceQueue[idx];
-    const text = words.map(w => w.text).join(' ');
-
-    try {
-      const res = await fetch(`${this.baseUrl}/synthesize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          text: text,
-          voice_id: this.currentVoiceId,
-          speed: this.playbackRate
-        })
-      });
-
-      if (res.ok && this.isPlaying) {
-        const blob = await res.blob();
-        const audioUrl = URL.createObjectURL(blob);
-        this.prefetchCache.set(idx, { audioUrl, words });
-      }
-    } catch (e) {
-      // Background prefetch failed silently; normal playback will retry on-demand
-    } finally {
-      this.isPrefetching.delete(idx);
     }
   }
 
@@ -439,19 +373,7 @@ class SoproService {
     }
     this.isPlaying = false;
     this.isPaused = false;
-    // Release all background pre-fetched blob URLs
-    if (this.prefetchCache) {
-      this.prefetchCache.forEach(({ audioUrl }) => {
-        if (audioUrl) URL.revokeObjectURL(audioUrl);
-      });
-      this.prefetchCache.clear();
-    }
-    if (this.isPrefetching) {
-      this.isPrefetching.clear();
-    }
-    this.sentenceQueue = [];
-    this.currentSentenceIndex = 0;
-    this.currentSentenceWords = [];
+    this.currentWords = [];
     this.wordTimings = [];
     this.currentWordIndex = -1;
     if (this.onStateChange) this.onStateChange('idle');
@@ -462,16 +384,121 @@ class SoproService {
   }
 
   /**
-   * Jump relative sentence count forward or backward.
+   * Jump relative sentence forward or backward by seeking in the page audio stream.
    */
   skipSentence(direction) {
-    if (!this.isPlaying) return;
-    const targetIdx = this.currentSentenceIndex + direction;
-    if (targetIdx >= 0 && targetIdx < this.sentenceQueue.length) {
-      this.audioElement.pause();
-      this._stopHighlightLoop();
-      this.currentSentenceIndex = targetIdx;
-      this._playCurrentSentence();
+    if (!this.isPlaying || !this.wordTimings || this.wordTimings.length === 0) return;
+    const curIdx = this.currentWordIndex >= 0 ? this.currentWordIndex : 0;
+    let targetWordIdx = -1;
+
+    if (direction > 0) {
+      for (let i = curIdx; i < this.currentWords.length - 1; i++) {
+        if (/[.?!]$/.test((this.currentWords[i].text || '').trim())) {
+          targetWordIdx = i + 1;
+          break;
+        }
+      }
+      if (targetWordIdx === -1) targetWordIdx = this.currentWords.length - 1;
+    } else {
+      for (let i = curIdx - 1; i >= 0; i--) {
+        if (/[.?!]$/.test((this.currentWords[i].text || '').trim())) {
+          targetWordIdx = i + 1;
+          break;
+        }
+      }
+      if (targetWordIdx === -1) targetWordIdx = 0;
+    }
+
+    if (targetWordIdx >= 0 && targetWordIdx < this.wordTimings.length) {
+      const targetTiming = this.wordTimings[targetWordIdx];
+      if (targetTiming && typeof targetTiming.start === 'number') {
+        this.audioElement.currentTime = targetTiming.start;
+        this.currentWordIndex = targetWordIdx;
+        const w = this.currentWords[targetWordIdx];
+        if (w && this.onWord) {
+          this.onWord(w.wordIdx, w.text, w.charStart);
+        }
+      }
+    }
+  }
+
+  /**
+   * Fetch all saved page recordings from the backend.
+   */
+  async getRecordings() {
+    try {
+      const res = await fetch(`${this.baseUrl}/recordings`);
+      if (res.ok) {
+        const data = await res.json();
+        return data.recordings || [];
+      }
+    } catch (err) {
+      console.warn('Failed to fetch recordings:', err);
+    }
+    return [];
+  }
+
+  /**
+   * Trigger immediate browser download of an audio Blob as MP3.
+   */
+  downloadBlob(blob, filename = 'page_recording.mp3') {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
+  }
+
+  /**
+   * Download a saved recording by ID from the server.
+   */
+  downloadRecording(recordingId) {
+    const a = document.createElement('a');
+    a.href = `${this.baseUrl}/recordings/${recordingId}/download`;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  /**
+   * Download all saved recordings as a single ZIP archive.
+   */
+  downloadAllRecordings() {
+    const a = document.createElement('a');
+    a.href = `${this.baseUrl}/recordings/download-all`;
+    a.download = 'all_page_recordings.zip';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
+  /**
+   * Delete an individual recording.
+   */
+  async deleteRecording(recordingId) {
+    try {
+      const res = await fetch(`${this.baseUrl}/recordings/${recordingId}`, { method: 'DELETE' });
+      return res.ok;
+    } catch (err) {
+      console.error('Failed to delete recording:', err);
+      return false;
+    }
+  }
+
+  /**
+   * Clear all saved recordings.
+   */
+  async clearAllRecordings() {
+    try {
+      const res = await fetch(`${this.baseUrl}/recordings`, { method: 'DELETE' });
+      return res.ok;
+    } catch (err) {
+      console.error('Failed to clear recordings:', err);
+      return false;
     }
   }
 }

@@ -1,5 +1,5 @@
 export class Player {
-  constructor({ onPlayPause, onStop, onSkipSentence, onVoiceChange, onSpeedChange, onAutoScrollChange, onCloneVoiceClick }) {
+  constructor({ onPlayPause, onStop, onSkipSentence, onVoiceChange, onSpeedChange, onAutoScrollChange, onCloneVoiceClick, onOpenRecordings, onDownloadPageRecording }) {
     this.onPlayPause = onPlayPause;
     this.onStop = onStop;
     this.onSkipSentence = onSkipSentence;
@@ -7,10 +7,13 @@ export class Player {
     this.onSpeedChange = onSpeedChange;
     this.onAutoScrollChange = onAutoScrollChange;
     this.onCloneVoiceClick = onCloneVoiceClick;
+    this.onOpenRecordings = onOpenRecordings;
+    this.onDownloadPageRecording = onDownloadPageRecording;
 
     this.isPlaying = false;
     this.isPaused = false;
     this.autoScroll = true;
+    this.latestCompletedRecording = null;
 
     this.initElements();
     this.bindEvents();
@@ -51,12 +54,27 @@ export class Player {
         <div class="current-speech-preview" id="current-speech-preview">
           <span>Ready to read. Click Play or click any word on the document.</span>
         </div>
-        <div class="playback-subtext" id="playback-stats">
-          <span>Web Speech Synthesis Active</span>
+        <div class="player-center-bottom">
+          <div class="playback-subtext" id="playback-stats">
+            <span>Web Speech Synthesis Active</span>
+          </div>
+
+          <!-- Completed Page Quick Download Button -->
+          <div class="completed-download-wrap" id="completed-download-wrap" style="display: none;">
+            <button class="btn-download-page-pill" id="btn-download-page-mp3" title="Download MP3 of completed page">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+              <span id="download-page-label">Download Page 1 MP3</span>
+            </button>
+          </div>
         </div>
       </div>
 
       <div class="player-right">
+        <!-- Recordings Manager Trigger Button -->
+        <button class="btn-recordings-trigger" id="btn-open-recordings" title="View & download all saved page MP3 recordings">
+          <span>🎧</span> Recordings <span class="badge-rec-count" id="player-rec-count">0</span>
+        </button>
+
         <!-- Clone Voice Trigger Button -->
         <button class="btn-clone-voice" id="btn-open-clone-modal" title="Clone a new voice or record your own voice with Sopro V2 Turbo">
           <span>✨</span> Clone Voice
@@ -103,6 +121,11 @@ export class Player {
     this.voiceSelect = document.getElementById('voice-select');
     this.speedSelect = document.getElementById('speed-select');
     this.btnOpenCloneModal = document.getElementById('btn-open-clone-modal');
+    this.btnOpenRecordings = document.getElementById('btn-open-recordings');
+    this.playerRecCount = document.getElementById('player-rec-count');
+    this.completedDownloadWrap = document.getElementById('completed-download-wrap');
+    this.btnDownloadPageMp3 = document.getElementById('btn-download-page-mp3');
+    this.downloadPageLabel = document.getElementById('download-page-label');
     this.autoScrollToggle = document.getElementById('auto-scroll-toggle');
   }
 
@@ -142,6 +165,20 @@ export class Player {
     this.speedSelect.addEventListener('change', (e) => {
       this.onSpeedChange(e.target.value);
     });
+
+    if (this.btnOpenRecordings) {
+      this.btnOpenRecordings.addEventListener('click', () => {
+        if (this.onOpenRecordings) this.onOpenRecordings();
+      });
+    }
+
+    if (this.btnDownloadPageMp3) {
+      this.btnDownloadPageMp3.addEventListener('click', () => {
+        if (this.latestCompletedRecording && this.onDownloadPageRecording) {
+          this.onDownloadPageRecording(this.latestCompletedRecording);
+        }
+      });
+    }
 
     if (this.autoScrollToggle) {
       this.autoScrollToggle.addEventListener('change', (e) => {
@@ -256,5 +293,31 @@ export class Player {
     this.visualizer.classList.remove('speaking');
     this.iconPlay.style.display = 'block';
     this.iconPause.style.display = 'none';
+  }
+
+  showPageCompletedDownload(recording) {
+    if (!recording) return;
+    this.latestCompletedRecording = recording;
+    if (this.downloadPageLabel) {
+      this.downloadPageLabel.textContent = `Download Page ${recording.pageNum} MP3`;
+    }
+    if (this.completedDownloadWrap) {
+      this.completedDownloadWrap.style.display = 'flex';
+      this.completedDownloadWrap.classList.add('pulse-highlight');
+    }
+  }
+
+  hidePageCompletedDownload() {
+    if (this.completedDownloadWrap) {
+      this.completedDownloadWrap.style.display = 'none';
+      this.completedDownloadWrap.classList.remove('pulse-highlight');
+    }
+  }
+
+  updateRecordingsCount(count) {
+    if (this.playerRecCount) {
+      this.playerRecCount.textContent = count || 0;
+      this.playerRecCount.classList.toggle('has-recordings', (count || 0) > 0);
+    }
   }
 }

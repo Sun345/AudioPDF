@@ -22,6 +22,7 @@ except Exception as e:
 
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
+import zipfile
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -40,6 +41,10 @@ BASE_DIR = Path(__file__).resolve().parent
 VOICES_DIR = BASE_DIR / "voices"
 VOICES_DIR.mkdir(parents=True, exist_ok=True)
 VOICES_FILE = VOICES_DIR / "voices.json"
+
+RECORDINGS_DIR = BASE_DIR / "recordings"
+RECORDINGS_DIR.mkdir(parents=True, exist_ok=True)
+RECORDINGS_FILE = RECORDINGS_DIR / "recordings.json"
 
 app = FastAPI(
     title="Sopro V2 Turbo CPU Server",
@@ -99,6 +104,23 @@ def save_voices_metadata(voices: List[Dict]):
         json.dump(voices, f, indent=2, ensure_ascii=False)
 
 
+def load_recordings_metadata() -> List[Dict]:
+    """Load list of saved page audio recordings."""
+    if not RECORDINGS_FILE.exists():
+        return []
+    try:
+        with open(RECORDINGS_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_recordings_metadata(recordings: List[Dict]):
+    """Save list of saved page audio recordings."""
+    with open(RECORDINGS_FILE, "w", encoding="utf-8") as f:
+        json.dump(recordings, f, indent=2, ensure_ascii=False)
+
+
 def get_voice_reference(voice_id: str) -> Optional[Reference]:
     """Retrieve cached Reference embedding or compute and cache it."""
     if voice_id in cached_references:
@@ -135,6 +157,9 @@ class SynthesizeRequest(BaseModel):
     text: str
     voice_id: Optional[str] = "narrator"
     speed: Optional[float] = 1.0
+    page_num: Optional[int] = None
+    doc_name: Optional[str] = "Document"
+    format: Optional[str] = "mp3"
 
 
 @app.on_event("startup")
@@ -291,7 +316,7 @@ def delete_voice(voice_id: str):
 def synthesize(req: SynthesizeRequest):
     """
     Synthesize text using cloned voice reference on CPU.
-    Returns 24kHz WAV audio stream.
+    Returns MP3 (or WAV) audio stream and automatically persists recording for page download.
     """
     text = req.text.strip()
     if not text:
@@ -300,7 +325,18 @@ def synthesize(req: SynthesizeRequest):
     tts = get_tts_model()
     ref = get_voice_reference(req.voice_id)
 
-    logger.info(f"Synthesizing text ({len(text)} chars) with voice_id '{req.voice_id}' on CPU...")
+    # Determine audio format
+    req_format = (req.format or "mp3").lower()
+    if req_format == "wav":
+        out_fmt = "WAV"
+        out_ext = "wav"
+        media_type = "audio/wav"
+    else:
+        out_fmt = "MP3"
+        out_ext = "mp3"
+        media_type = "audio/mpeg"
+
+    logger.info(f"Synthesizing text ({len(text)} chars, page {req.page_num}) with voice '{req.voice_id}' as {out_fmt} on CPU...")
     start_time = time.time()
 
     try:
@@ -313,7 +349,7 @@ def synthesize(req: SynthesizeRequest):
         elapsed = time.time() - start_time
         logger.info(f"Synthesized speech in {elapsed:.2f}s on CPU")
 
-        # Convert torch tensor to WAV bytes
+        # Convert torch tensor to numpy array
         if isinstance(wav_tensor, torch.Tensor):
             wav_data = wav_tensor.detach().cpu().numpy()
         else:
@@ -329,25 +365,160 @@ def synthesize(req: SynthesizeRequest):
             wav_data = wav_data / max_val
 
         out_buffer = io.BytesIO()
-        sf.write(out_buffer, wav_data, tts.sample_rate, format='WAV')
+        sf.write(out_buffer, wav_data, tts.sample_rate, format=out_fmt)
         out_buffer.seek(0)
 
-        wav_bytes = out_buffer.getvalue()
+        audio_bytes = out_buffer.getvalue()
         duration = len(wav_data) / tts.sample_rate
 
+        # Resolve voice display name
+        voices = load_voices_metadata()
+        voice_entry = next((v for v in voices if v["id"] == req.voice_id), None)
+        voice_name = voice_entry["name"] if voice_entry else (req.voice_id or "Default Narrator")
+
+        # Save recording automatically for page
+        rec_id = f"rec_{int(time.time())}_{uuid.uuid4().hex[:6]}"
+        page_num = req.page_num if req.page_num is not None else 1
+        rec_filename = f"page_{page_num}_{rec_id}.{out_ext}"
+        rec_file_path = RECORDINGS_DIR / rec_filename
+        rec_file_path.write_bytes(audio_bytes)
+
+        recordings = load_recordings_metadata()
+        new_rec = {
+            "id": rec_id,
+            "pageNum": page_num,
+            "docName": req.doc_name or "Document",
+            "voiceId": req.voice_id,
+            "voiceName": voice_name,
+            "duration": round(duration, 2),
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "filename": rec_filename,
+            "format": out_ext,
+            "fileSize": len(audio_bytes)
+        }
+        recordings.insert(0, new_rec)
+        save_recordings_metadata(recordings)
+        logger.info(f"Saved recording '{rec_filename}' ({duration:.2f}s) for Page {page_num}")
+
         return Response(
-            content=wav_bytes,
-            media_type="audio/wav",
+            content=audio_bytes,
+            media_type=media_type,
             headers={
-                "Content-Disposition": "inline; filename=speech.wav",
+                "Content-Disposition": f"inline; filename=page_{page_num}.{out_ext}",
                 "X-Audio-Duration": str(round(duration, 3)),
-                "X-Audio-Sample-Rate": str(tts.sample_rate)
+                "X-Audio-Sample-Rate": str(tts.sample_rate),
+                "X-Recording-Id": rec_id,
+                "X-Recording-Filename": rec_filename,
+                "X-Recording-Voice": voice_name,
+                "X-Audio-Format": out_ext
             }
         )
 
     except Exception as e:
         logger.error(f"Synthesis failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Synthesis failed: {str(e)}")
+
+
+@app.get("/api/recordings")
+def get_recordings():
+    """Get list of all saved page MP3 audio recordings."""
+    recordings = load_recordings_metadata()
+    # Filter out entries where file no longer exists
+    valid_recordings = []
+    for r in recordings:
+        fpath = RECORDINGS_DIR / r["filename"]
+        if fpath.exists():
+            valid_recordings.append(r)
+    if len(valid_recordings) != len(recordings):
+        save_recordings_metadata(valid_recordings)
+    return {"recordings": valid_recordings}
+
+
+@app.get("/api/recordings/{recording_id}/download")
+def download_recording(recording_id: str):
+    """Download individual page MP3 recording file."""
+    recordings = load_recordings_metadata()
+    rec = next((r for r in recordings if r["id"] == recording_id), None)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    file_path = RECORDINGS_DIR / rec["filename"]
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Recording file missing on disk")
+
+    clean_voice = "".join(c for c in rec.get("voiceName", "Voice") if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
+    dl_filename = f"Page_{rec.get('pageNum', 1)}_{clean_voice}.{rec.get('format', 'mp3')}"
+    media_type = "audio/mpeg" if rec.get("format") == "mp3" else "audio/wav"
+
+    return FileResponse(
+        path=str(file_path),
+        media_type=media_type,
+        filename=dl_filename,
+        headers={"Content-Disposition": f'attachment; filename="{dl_filename}"'}
+    )
+
+
+@app.get("/api/recordings/download-all")
+def download_all_recordings():
+    """Download all saved page recordings packaged into a single ZIP archive."""
+    recordings = load_recordings_metadata()
+    valid_recordings = [r for r in recordings if (RECORDINGS_DIR / r["filename"]).exists()]
+    if not valid_recordings:
+        raise HTTPException(status_code=404, detail="No recordings available to download")
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        # Sort by page number
+        sorted_recs = sorted(valid_recordings, key=lambda x: (x.get("pageNum", 1), x.get("createdAt", "")))
+        for idx, rec in enumerate(sorted_recs, start=1):
+            file_path = RECORDINGS_DIR / rec["filename"]
+            clean_voice = "".join(c for c in rec.get("voiceName", "Voice") if c.isalnum() or c in (' ', '_', '-')).strip().replace(' ', '_')
+            arcname = f"Page_{rec.get('pageNum', idx)}_{clean_voice}_{rec['id'][-4:]}.{rec.get('format', 'mp3')}"
+            zf.write(file_path, arcname=arcname)
+
+    zip_buffer.seek(0)
+    return Response(
+        content=zip_buffer.getvalue(),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": 'attachment; filename="all_page_recordings.zip"'
+        }
+    )
+
+
+@app.delete("/api/recordings/{recording_id}")
+def delete_recording(recording_id: str):
+    """Delete a single page recording."""
+    recordings = load_recordings_metadata()
+    rec = next((r for r in recordings if r["id"] == recording_id), None)
+    if not rec:
+        raise HTTPException(status_code=404, detail="Recording not found")
+
+    file_path = RECORDINGS_DIR / rec["filename"]
+    if file_path.exists():
+        try:
+            file_path.unlink()
+        except Exception:
+            pass
+
+    recordings = [r for r in recordings if r["id"] != recording_id]
+    save_recordings_metadata(recordings)
+    return {"status": "deleted", "id": recording_id}
+
+
+@app.delete("/api/recordings")
+def clear_all_recordings():
+    """Clear all saved recordings."""
+    recordings = load_recordings_metadata()
+    for rec in recordings:
+        fpath = RECORDINGS_DIR / rec["filename"]
+        if fpath.exists():
+            try:
+                fpath.unlink()
+            except Exception:
+                pass
+    save_recordings_metadata([])
+    return {"status": "cleared"}
 
 
 if __name__ == "__main__":

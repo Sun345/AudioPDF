@@ -38,3 +38,8 @@ __pycache__/
 *$py.class
 venv/
 .venv/
+
+# Generated audio recordings
+server/recordings/*.mp3
+server/recordings/*.wav
+

@@ -5,6 +5,7 @@ import { Toolbar } from './components/toolbar.js';
 import { Player } from './components/player.js';
 import { Sidebar } from './components/sidebar.js';
 import { CloneVoiceModal } from './components/cloneVoiceModal.js';
+import { RecordingsModal } from './components/recordingsModal.js';
 
 class PDFReaderApp {
   constructor() {
@@ -17,6 +18,7 @@ class PDFReaderApp {
     this.viewMode = 'doc'; // 'doc' | 'focus' | 'split'
     this.autoScroll = true;
     this.currentSpeed = 1.0;
+    this.currentDocName = 'Sample Document';
 
     this.currentPageData = null;
     this.soproVoices = [];
@@ -67,7 +69,12 @@ class PDFReaderApp {
       }
     });
 
-    // 3. Player
+    // 3. Recordings Modal
+    this.recordingsModal = new RecordingsModal((count) => {
+      this.player.updateRecordingsCount(count);
+    });
+
+    // 4. Player
     this.player = new Player({
       onPlayPause: () => this.handlePlayPause(),
       onStop: () => this.handleStop(),
@@ -75,7 +82,16 @@ class PDFReaderApp {
       onVoiceChange: (voiceURI) => this.handleVoiceChange(voiceURI),
       onSpeedChange: (speed) => this.handleSpeedChange(speed),
       onAutoScrollChange: (enabled) => { this.autoScroll = enabled; },
-      onCloneVoiceClick: () => this.cloneVoiceModal.open()
+      onCloneVoiceClick: () => this.cloneVoiceModal.open(),
+      onOpenRecordings: () => this.recordingsModal.open(),
+      onDownloadPageRecording: (rec) => {
+        if (rec.blob) {
+          const cleanVoice = (rec.voiceName || 'Voice').replace(/\s+/g, '_');
+          soproService.downloadBlob(rec.blob, `Page_${rec.pageNum || this.currentPage}_${cleanVoice}.mp3`);
+        } else if (rec.id) {
+          soproService.downloadRecording(rec.id);
+        }
+      }
     });
 
     // Populate voices when Web Speech voices loaded
@@ -83,12 +99,12 @@ class PDFReaderApp {
       this.refreshVoices();
     };
 
-    // 4. Sidebar
+    // 5. Sidebar
     this.sidebar = new Sidebar({
       onSelectPage: (pageNum) => this.goToPage(pageNum)
     });
 
-    // 5. TTS Event Handlers (Web Speech)
+    // 6. TTS Event Handlers (Web Speech)
     this.ttsService.onWordCallback = (wordObj, wordIdx) => {
       this.handleWordSpoken(wordObj, wordIdx);
     };
@@ -103,7 +119,7 @@ class PDFReaderApp {
       this.handleSpeechEnd();
     };
 
-    // 6. Sopro Event Handlers (Local CPU AI Voice)
+    // 7. Sopro Event Handlers (Local CPU AI Voice)
     soproService.onWord = (wordIdx, text, charStart) => {
       if (this.currentPageData && this.currentPageData.words) {
         const wordObj = this.currentPageData.words.find(w => w.wordIdx === wordIdx);
@@ -122,11 +138,18 @@ class PDFReaderApp {
       }
     };
 
+    // Fired when whole page reading completes in Clone Mode
+    soproService.onPageComplete = (recording) => {
+      this.player.showPageCompletedDownload(recording);
+      this.recordingsModal.loadRecordings();
+      this.showPageCompleteToast(recording);
+    };
+
     soproService.onEnd = () => {
       this.handleSpeechEnd();
     };
 
-    // 7. PDF Word Click Handler (Doc Mode Click-to-Speak)
+    // 8. PDF Word Click Handler (Doc Mode Click-to-Speak)
     this.pdfService.onWordClick = (wordIdx, pageNum) => {
       if (pageNum && pageNum !== this.currentPage) {
         this.goToPage(pageNum).then(() => {
@@ -254,6 +277,7 @@ class PDFReaderApp {
   async loadDocumentUrl(url) {
     try {
       this.showLoading(true);
+      this.currentDocName = url.split('/').pop().replace(/\.[^/.]+$/, '') || 'Document';
       await this.pdfService.loadDocument(url);
       await this.onDocumentLoaded();
     } catch (err) {
@@ -267,6 +291,7 @@ class PDFReaderApp {
   async loadDocumentFile(file) {
     try {
       this.showLoading(true);
+      this.currentDocName = file.name.replace(/\.[^/.]+$/, '') || 'Document';
       await this.pdfService.loadDocument(file);
       await this.onDocumentLoaded();
     } catch (err) {
@@ -430,14 +455,21 @@ class PDFReaderApp {
     if (!this.currentPageData || !this.currentPageData.words || this.currentPageData.words.length === 0) return;
 
     if (this.selectedVoiceUri && this.selectedVoiceUri.startsWith('sopro:')) {
-      // Use local Sopro TTS on CPU
+      // Use local Sopro TTS on CPU (single-pass whole-page reading)
       this.ttsService.stop();
       const voiceId = this.selectedVoiceUri.replace('sopro:', '');
       const remainingWords = this.currentPageData.words.slice(wordIdx);
       const textToSpeak = remainingWords.map(w => w.text).join(' ');
 
       try {
-        await soproService.speak(textToSpeak, remainingWords, voiceId, this.currentSpeed);
+        await soproService.speak(
+          textToSpeak,
+          remainingWords,
+          voiceId,
+          this.currentSpeed,
+          this.currentPage,
+          this.currentDocName || 'Document'
+        );
       } catch (err) {
         alert('Sopro speech synthesis error: ' + err.message + '\nMake sure the local Sopro server is running on port 8000.');
       }
@@ -518,6 +550,63 @@ class PDFReaderApp {
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  showPageCompleteToast(recording) {
+    if (!recording) return;
+
+    let toast = document.getElementById('page-complete-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'page-complete-toast';
+      toast.className = 'page-complete-toast';
+      document.body.appendChild(toast);
+    }
+
+    const durMins = Math.floor((recording.duration || 0) / 60);
+    const durSecs = Math.floor((recording.duration || 0) % 60).toString().padStart(2, '0');
+
+    toast.innerHTML = `
+      <div class="toast-content">
+        <div class="toast-icon">✨</div>
+        <div class="toast-info">
+          <div class="toast-title">Page ${recording.pageNum} Read Completed</div>
+          <div class="toast-subtext">MP3 Ready (${durMins}:${durSecs}) • ${this.escapeHtml(recording.voiceName || 'Voice')}</div>
+        </div>
+      </div>
+      <div class="toast-actions">
+        <button class="btn btn-sm btn-toast-dl" id="toast-dl-btn">
+          ⬇️ Download MP3
+        </button>
+        <button class="toast-close-btn" id="toast-close-btn" title="Dismiss">✕</button>
+      </div>
+    `;
+
+    toast.classList.add('visible');
+
+    const dlBtn = toast.querySelector('#toast-dl-btn');
+    const closeBtn = toast.querySelector('#toast-close-btn');
+
+    dlBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (recording.blob) {
+        const cleanVoice = (recording.voiceName || 'Voice').replace(/\s+/g, '_');
+        soproService.downloadBlob(recording.blob, `Page_${recording.pageNum}_${cleanVoice}.mp3`);
+      } else if (recording.id) {
+        soproService.downloadRecording(recording.id);
+      }
+      toast.classList.remove('visible');
+    };
+
+    closeBtn.onclick = (e) => {
+      e.stopPropagation();
+      toast.classList.remove('visible');
+    };
+
+    if (this._toastTimeout) clearTimeout(this._toastTimeout);
+    this._toastTimeout = setTimeout(() => {
+      toast.classList.remove('visible');
+    }, 9000);
   }
 }
 
